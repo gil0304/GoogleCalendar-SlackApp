@@ -115,9 +115,12 @@ export function buildFormView(
   baseUrl: string,
   data: Partial<GcalFormData> = {},
   connection?: { connected: boolean; email?: string },
-  attendeeOptions?: Array<{ text: { type: 'plain_text'; text: string }; value: string }>
+  attendeeOptions?: Array<{ text: { type: 'plain_text'; text: string }; value: string }>,
+  viewId?: string
 ) {
-  const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(userId)}`;
+  const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(userId)}${
+    viewId ? `&view=${encodeURIComponent(viewId)}` : ''
+  }`;
   const mode: GcalFormMode = data.mode ?? 'create';
   const requestMode: GcalRequestMode = data.requestMode ?? 'fixed';
   const blocks: any[] = [

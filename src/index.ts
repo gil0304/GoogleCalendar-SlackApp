@@ -129,17 +129,18 @@ async function main() {
     receiver
   });
 
-  const oauthState = new Map<string, { userId: string; createdAt: number }>();
+  const oauthState = new Map<string, { userId: string; createdAt: number; viewId?: string }>();
 
   receiver.app.get('/oauth/start', (req, res) => {
     const userId = typeof req.query.user === 'string' ? req.query.user : '';
+    const viewId = typeof req.query.view === 'string' ? req.query.view : '';
     if (!userId) {
       res.status(400).send('Missing user.');
       return;
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    oauthState.set(state, { userId, createdAt: Date.now() });
+    oauthState.set(state, { userId, createdAt: Date.now(), viewId: viewId || undefined });
 
     const oauth2 = createOAuth2Client(baseUrl);
     const authUrl = oauth2.generateAuthUrl({
@@ -194,7 +195,27 @@ async function main() {
       }
 
       await setUserToken(stateInfo.userId, tokens.refresh_token, email);
-      res.send('Googleカレンダー連携が完了しました。Slackに戻って /gcal を試してください。');
+
+      if (stateInfo.viewId) {
+        try {
+          const attendeeOptions = await buildAttendeeOptions(app.client, stateInfo.userId);
+          await app.client.views.update({
+            view_id: stateInfo.viewId,
+            view: buildFormView(
+              stateInfo.userId,
+              baseUrl,
+              {},
+              { connected: true, email },
+              attendeeOptions,
+              stateInfo.viewId
+            ) as any
+          });
+        } catch (viewErr) {
+          console.warn('Failed to update modal after OAuth', viewErr);
+        }
+      }
+
+      res.send('Googleカレンダー連携が完了しました。Slackに戻って確認してください。');
     } catch (err) {
       console.error('OAuth callback failed', err);
       res.status(500).send('OAuth処理に失敗しました。');
@@ -240,7 +261,8 @@ async function main() {
           baseUrl,
           {},
           { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
-          attendeeOptions
+          attendeeOptions,
+          viewId
         ) as any
       });
     } catch (err) {
@@ -268,7 +290,8 @@ async function main() {
         baseUrl,
         next,
         { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
-        attendeeOptions
+        attendeeOptions,
+        body.view.id
       ) as any
     });
   });
@@ -287,7 +310,8 @@ async function main() {
         baseUrl,
         next,
         { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
-        attendeeOptions
+        attendeeOptions,
+        body.view.id
       ) as any
     });
   });
@@ -297,7 +321,7 @@ async function main() {
     await removeUserToken(body.user.id);
     await client.views.update({
       view_id: body.view.id,
-      view: buildFormView(body.user.id, baseUrl, { mode: 'create' }, { connected: false }) as any
+      view: buildFormView(body.user.id, baseUrl, { mode: 'create' }, { connected: false }, [], body.view.id) as any
     });
   });
 
@@ -318,7 +342,7 @@ async function main() {
     const requesterId = body.user.id;
     const viewId = body.view.id;
     const requesterToken = await getUserToken(requesterId);
-    const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(requesterId)}`;
+    const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(requesterId)}&view=${encodeURIComponent(viewId)}`;
 
     if (!requesterToken?.refreshToken && data.mode !== 'free') {
       await client.views.update({
@@ -1019,7 +1043,7 @@ async function main() {
     try {
       const requesterToken = await getUserToken(payload.requesterId);
       if (!requesterToken?.refreshToken) {
-        const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(payload.requesterId)}`;
+        const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(payload.requesterId)}&view=${encodeURIComponent(body.view.id)}`;
         await client.views.update({
           view_id: body.view.id,
           view: buildResultView('Google連携が必要です', `先にGoogleアカウント連携が必要です。\n${connectUrl}`) as any
