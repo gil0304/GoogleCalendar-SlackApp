@@ -21,7 +21,8 @@ import {
   findFirstAvailableSlot,
   formatIntervalsShort,
   listDays,
-  mergeBusyIntervals
+  mergeBusyIntervals,
+  parseBusyInterval
 } from './utils/intervals';
 import {
   buildFormView,
@@ -200,20 +201,57 @@ async function main() {
     }
   });
 
-  app.command('/gcal', async ({ command, ack, client }: any) => {
+  app.command('/gcal', async ({ command, ack, client, respond }: any) => {
     await ack();
-    const tokenInfo = await getUserToken(command.user_id);
-    const attendeeOptions = await buildAttendeeOptions(client, command.user_id);
-    await client.views.open({
-      trigger_id: command.trigger_id,
-      view: buildFormView(
-        command.user_id,
-        baseUrl,
-        {},
-        { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
-        attendeeOptions
-      ) as any
-    });
+
+    let viewId: string | undefined;
+    try {
+      const opened = await client.views.open({
+        trigger_id: command.trigger_id,
+        view: buildLoadingView('読み込み中', 'フォームを準備しています...') as any
+      });
+      viewId = (opened as any)?.view?.id;
+    } catch (err) {
+      console.error('Failed to open /gcal modal', err);
+      if (respond) {
+        await respond({
+          response_type: 'ephemeral',
+          text: 'モーダルを開けませんでした。もう一度 /gcal を実行してください。'
+        });
+      }
+      return;
+    }
+
+    try {
+      const [tokenInfo, attendeeOptions] = await Promise.all([
+        getUserToken(command.user_id),
+        buildAttendeeOptions(client, command.user_id)
+      ]);
+
+      if (!viewId) {
+        console.warn('Missing view_id after views.open for /gcal');
+        return;
+      }
+
+      await client.views.update({
+        view_id: viewId,
+        view: buildFormView(
+          command.user_id,
+          baseUrl,
+          {},
+          { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
+          attendeeOptions
+        ) as any
+      });
+    } catch (err) {
+      console.error('Failed to build /gcal form view', err);
+      if (viewId) {
+        await client.views.update({
+          view_id: viewId,
+          view: buildResultView('エラー', 'フォームの準備に失敗しました。もう一度お試しください。') as any
+        });
+      }
+    }
   });
 
   app.action('mode_select', async ({ ack, body, client }: any) => {
@@ -407,8 +445,9 @@ async function main() {
           const busy = result.data.calendars?.primary?.busy ?? [];
           for (const interval of busy) {
             if (!interval.start || !interval.end) continue;
-            const start = DateTime.fromISO(interval.start, { zone });
-            const end = DateTime.fromISO(interval.end, { zone });
+            const parsed = parseBusyInterval(interval.start, interval.end, zone);
+            const start = parsed.start;
+            const end = parsed.end;
             if (start.isValid && end.isValid) {
               busyIntervals.push({ start, end });
             }
@@ -581,8 +620,9 @@ async function main() {
             const busy = result.data.calendars?.primary?.busy ?? [];
             for (const interval of busy) {
               if (!interval.start || !interval.end) continue;
-              const startBusy = DateTime.fromISO(interval.start, { zone });
-              const endBusy = DateTime.fromISO(interval.end, { zone });
+              const parsed = parseBusyInterval(interval.start, interval.end, zone);
+              const startBusy = parsed.start;
+              const endBusy = parsed.end;
               if (startBusy.isValid && endBusy.isValid) {
                 busyIntervals.push({ start: startBusy, end: endBusy });
               }

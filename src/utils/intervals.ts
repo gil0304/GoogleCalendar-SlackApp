@@ -1,5 +1,17 @@
 import { DateTime } from 'luxon';
 
+export function parseBusyInterval(startRaw: string, endRaw: string, zone: string) {
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(startRaw) && /^\d{4}-\d{2}-\d{2}$/.test(endRaw);
+  if (isDateOnly) {
+    const start = DateTime.fromISO(startRaw, { zone }).startOf('day');
+    const end = DateTime.fromISO(endRaw, { zone }).startOf('day');
+    return { start, end };
+  }
+  const start = DateTime.fromISO(startRaw, { zone });
+  const end = DateTime.fromISO(endRaw, { zone });
+  return { start, end };
+}
+
 export function mergeBusyIntervals(
   intervals: Array<{ start: DateTime; end: DateTime }>,
   rangeStart: DateTime,

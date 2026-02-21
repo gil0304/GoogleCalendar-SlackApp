@@ -1,57 +1,86 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
+import { createClient } from '@supabase/supabase-js';
 
-type TokenStore = Record<string, { refreshToken: string; email?: string }>;
+type TokenRow = {
+  user_id: string;
+  refresh_token: string;
+  email?: string | null;
+};
 
-const tokenStorePath = path.join(process.cwd(), 'data', 'tokens.json');
+type TokenStoreValue = { refreshToken: string; email?: string };
 
-async function readTokenStore(): Promise<TokenStore> {
-  try {
-    const raw = await fs.readFile(tokenStorePath, 'utf8');
-    return JSON.parse(raw) as TokenStore;
-  } catch (err: any) {
-    if (err?.code === 'ENOENT') {
-      return {};
-    }
-    throw err;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const TOKEN_TABLE = process.env.GCAL_TOKEN_TABLE || 'gcal_tokens';
+
+if (!SUPABASE_URL) {
+  throw new Error('Missing env: SUPABASE_URL');
+}
+if (!SUPABASE_KEY) {
+  throw new Error('Missing env: SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY');
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: false }
+});
+
+export async function getUserToken(userId: string): Promise<TokenStoreValue | null> {
+  const { data, error } = await supabase
+    .from(TOKEN_TABLE)
+    .select('refresh_token,email')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
   }
-}
 
-async function writeTokenStore(store: TokenStore) {
-  await fs.mkdir(path.dirname(tokenStorePath), { recursive: true });
-  await fs.writeFile(tokenStorePath, JSON.stringify(store, null, 2), 'utf8');
-}
-
-export async function getUserToken(userId: string): Promise<TokenStore[string] | null> {
-  const store = await readTokenStore();
-  return store[userId] ?? null;
+  if (!data) return null;
+  return {
+    refreshToken: data.refresh_token,
+    email: data.email ?? undefined
+  };
 }
 
 export async function setUserToken(userId: string, refreshToken: string, email?: string) {
-  const store = await readTokenStore();
-  store[userId] = { refreshToken, email };
-  await writeTokenStore(store);
+  const { error } = await supabase.from(TOKEN_TABLE).upsert(
+    {
+      user_id: userId,
+      refresh_token: refreshToken,
+      email: email ?? null,
+      updated_at: new Date().toISOString()
+    },
+    { onConflict: 'user_id' }
+  );
+  if (error) {
+    throw error;
+  }
 }
 
 export async function updateUserEmail(userId: string, email: string) {
-  const store = await readTokenStore();
-  const current = store[userId];
-  if (!current) return;
-  store[userId] = { ...current, email };
-  await writeTokenStore(store);
+  const { error } = await supabase
+    .from(TOKEN_TABLE)
+    .update({ email, updated_at: new Date().toISOString() })
+    .eq('user_id', userId);
+  if (error) {
+    throw error;
+  }
 }
 
 export async function removeUserToken(userId: string) {
-  const store = await readTokenStore();
-  if (!store[userId]) return;
-  delete store[userId];
-  await writeTokenStore(store);
+  const { error } = await supabase.from(TOKEN_TABLE).delete().eq('user_id', userId);
+  if (error) {
+    throw error;
+  }
 }
 
 export async function listUserTokens(): Promise<Array<{ userId: string; email?: string }>> {
-  const store = await readTokenStore();
-  return Object.entries(store).map(([userId, value]) => ({
-    userId,
-    email: value.email
+  const { data, error } = await supabase.from(TOKEN_TABLE).select('user_id,email');
+  if (error) {
+    throw error;
+  }
+  return (data ?? []).map((row: Pick<TokenRow, 'user_id' | 'email'>) => ({
+    userId: row.user_id,
+    email: row.email ?? undefined
   }));
 }
