@@ -469,6 +469,9 @@ async function main() {
           const busy = result.data.calendars?.primary?.busy ?? [];
           for (const interval of busy) {
             if (!interval.start || !interval.end) continue;
+            if (process.env.DEBUG_FREEBUSY === '1') {
+              console.log('freebusy interval', interval.start, interval.end);
+            }
             const parsed = parseBusyInterval(interval.start, interval.end, zone);
             const start = parsed.start;
             const end = parsed.end;
@@ -644,6 +647,9 @@ async function main() {
             const busy = result.data.calendars?.primary?.busy ?? [];
             for (const interval of busy) {
               if (!interval.start || !interval.end) continue;
+              if (process.env.DEBUG_FREEBUSY === '1') {
+                console.log('freebusy interval', interval.start, interval.end);
+              }
               const parsed = parseBusyInterval(interval.start, interval.end, zone);
               const startBusy = parsed.start;
               const endBusy = parsed.end;
