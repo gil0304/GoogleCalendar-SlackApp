@@ -479,6 +479,25 @@ async function main() {
               busyIntervals.push({ start, end });
             }
           }
+
+          // Supplement: treat all-day events as busy for the whole day
+          const allDayEvents = await calendar.events.list({
+            calendarId: process.env.GCAL_CALENDAR_ID || 'primary',
+            timeMin: overallStart.toISO(),
+            timeMax: overallEnd.toISO(),
+            singleEvents: true,
+            orderBy: 'startTime'
+          } as any);
+          const items = (allDayEvents as any)?.data?.items ?? [];
+          for (const event of items) {
+            const startDate = event.start?.date;
+            const endDate = event.end?.date;
+            if (!startDate || !endDate) continue;
+            const parsed = parseBusyInterval(startDate, endDate, zone);
+            if (parsed.start.isValid && parsed.end.isValid) {
+              busyIntervals.push({ start: parsed.start, end: parsed.end });
+            }
+          }
         }
 
         const days = listDays(dateRange.startDate, dateRange.endDate);
