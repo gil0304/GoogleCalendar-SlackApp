@@ -2,13 +2,34 @@ import { DateTime } from 'luxon';
 
 export function parseBusyInterval(startRaw: string, endRaw: string, zone: string) {
   const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(startRaw) && /^\d{4}-\d{2}-\d{2}$/.test(endRaw);
+  const startDatePart = startRaw.slice(0, 10);
+  const endDatePart = endRaw.slice(0, 10);
+
   if (isDateOnly) {
-    const start = DateTime.fromISO(startRaw, { zone }).startOf('day');
-    const end = DateTime.fromISO(endRaw, { zone }).startOf('day');
+    const start = DateTime.fromISO(startDatePart, { zone }).startOf('day');
+    const end = DateTime.fromISO(endDatePart, { zone }).startOf('day');
     return { start, end };
   }
+
   const start = DateTime.fromISO(startRaw, { zone });
   const end = DateTime.fromISO(endRaw, { zone });
+
+  // Some all-day events come back as midnight timestamps (often in UTC).
+  const looksLikeAllDay =
+    start.isValid &&
+    end.isValid &&
+    start.hour === 0 &&
+    start.minute === 0 &&
+    end.hour === 0 &&
+    end.minute === 0 &&
+    end.diff(start, 'hours').hours >= 24;
+
+  if (looksLikeAllDay) {
+    const dayStart = DateTime.fromISO(startDatePart, { zone }).startOf('day');
+    const dayEnd = DateTime.fromISO(endDatePart, { zone }).startOf('day');
+    return { start: dayStart, end: dayEnd };
+  }
+
   return { start, end };
 }
 
