@@ -167,7 +167,7 @@ async function main() {
     const teamId = typeof req.query.team === 'string' ? req.query.team : '';
     const viewId = typeof req.query.view === 'string' ? req.query.view : '';
     if (!userId || !teamId) {
-      res.status(400).send('Missing user.');
+      res.status(400).send('Missing user/team.');
       return;
     }
 
@@ -244,6 +244,7 @@ async function main() {
             view_id: stateInfo.viewId,
             view: buildFormView(
               stateInfo.userId,
+              stateInfo.teamId,
               baseUrl,
               {},
               { connected: true, email },
@@ -266,6 +267,15 @@ async function main() {
   app.command('/gcal', async ({ command, ack, client, respond, context }: any) => {
     await ack();
     const teamId = resolveTeamId(command, context);
+    if (!teamId) {
+      if (respond) {
+        await respond({
+          response_type: 'ephemeral',
+          text: 'ワークスペース情報が取得できませんでした。もう一度お試しください。'
+        });
+      }
+      return;
+    }
 
     let viewId: string | undefined;
     try {
@@ -300,6 +310,7 @@ async function main() {
         view_id: viewId,
         view: buildFormView(
           command.user_id,
+          teamId,
           baseUrl,
           {},
           { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
@@ -330,6 +341,7 @@ async function main() {
       view_id: body.view.id,
       view: buildFormView(
         body.user.id,
+        teamId,
         baseUrl,
         next,
         { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
@@ -351,6 +363,7 @@ async function main() {
       view_id: body.view.id,
       view: buildFormView(
         body.user.id,
+        teamId,
         baseUrl,
         next,
         { connected: !!tokenInfo?.refreshToken, email: tokenInfo?.email },
@@ -366,7 +379,15 @@ async function main() {
     await removeUserToken(teamId, body.user.id);
     await client.views.update({
       view_id: body.view.id,
-      view: buildFormView(body.user.id, baseUrl, { mode: 'create' }, { connected: false }, [], body.view.id) as any
+      view: buildFormView(
+        body.user.id,
+        teamId,
+        baseUrl,
+        { mode: 'create' },
+        { connected: false },
+        [],
+        body.view.id
+      ) as any
     });
   });
 
