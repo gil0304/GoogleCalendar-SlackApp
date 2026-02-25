@@ -7,6 +7,7 @@ import { requireEnv } from './config/env';
 import { resolveColorId } from './config/colors';
 import { createOAuth2Client, fetchUserEmail, getCalendarClient, oauthScopes } from './google/oauth';
 import { getUserToken, listUserTokens, removeUserToken, setUserToken, updateUserEmail } from './store/tokenStore';
+import { slackInstallationStore } from './store/slackInstallationStore';
 import {
   formatTimeRange,
   isValidTimeRange,
@@ -39,6 +40,7 @@ import {
 const sharedRequestMap = new Map<
   string,
   {
+    teamId: string;
     requesterId: string;
     attendeeIds: string[];
     title: string;
@@ -50,8 +52,8 @@ const sharedRequestMap = new Map<
   }
 >();
 
-async function buildAttendeeOptions(client: any, currentUserId: string) {
-  const users = await listUserTokens();
+async function buildAttendeeOptions(client: any, teamId: string, currentUserId: string) {
+  const users = await listUserTokens(teamId);
   const results: Array<{ text: { type: 'plain_text'; text: string }; value: string }> = [];
   for (const item of users) {
     if (results.length >= 100) break;
@@ -71,6 +73,17 @@ async function buildAttendeeOptions(client: any, currentUserId: string) {
     results.push({ text: { type: 'plain_text', text: label }, value: item.userId });
   }
   return results;
+}
+
+function resolveTeamId(payload: any, context?: any) {
+  return (
+    context?.teamId ||
+    payload?.team?.id ||
+    payload?.team_id ||
+    payload?.user?.team_id ||
+    payload?.user?.teamId ||
+    ''
+  );
 }
 
 function buildShareMessageBlocks(
@@ -117,30 +130,78 @@ function buildShareMessageBlocks(
 
 async function main() {
   const signingSecret = requireEnv('SLACK_SIGNING_SECRET');
-  const botToken = requireEnv('SLACK_BOT_TOKEN');
+  const botToken = process.env.SLACK_BOT_TOKEN;
   const port = Number(process.env.PORT || 3000);
   const baseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
 
-  const receiver = new ExpressReceiver({ signingSecret });
+  const receiverOptions: any = { signingSecret };
+  if (!botToken) {
+    receiverOptions.clientId = requireEnv('SLACK_CLIENT_ID');
+    receiverOptions.clientSecret = requireEnv('SLACK_CLIENT_SECRET');
+    receiverOptions.stateSecret = requireEnv('SLACK_STATE_SECRET');
+    receiverOptions.scopes = ['commands', 'chat:write', 'users:read', 'im:write'];
+    receiverOptions.installationStore = slackInstallationStore;
+    receiverOptions.installerOptions = {
+      installPath: '/slack/install',
+      redirectUriPath: '/slack/oauth_redirect'
+    };
+  }
+
+  const receiver = new ExpressReceiver(receiverOptions);
   receiver.app.get('/health', (_req, res) => res.status(200).send('ok'));
 
-  const app = new App({
-    token: botToken,
-    receiver
-  });
+  const appOptions: any = { receiver };
+  if (botToken) {
+    appOptions.token = botToken;
+  } else {
+    appOptions.authorize = async ({
+      teamId,
+      enterpriseId,
+      isEnterpriseInstall
+    }: {
+      teamId?: string;
+      enterpriseId?: string;
+      isEnterpriseInstall?: boolean;
+    }) => {
+      const installation = await slackInstallationStore.fetchInstallation({
+        teamId,
+        enterpriseId,
+        isEnterpriseInstall: !!isEnterpriseInstall
+      });
+      return {
+        botToken: installation.bot?.token,
+        botId: installation.bot?.id,
+        botUserId: installation.bot?.userId,
+        userId: installation.user?.id,
+        teamId: installation.team?.id,
+        enterpriseId: installation.enterprise?.id
+      };
+    };
+  }
 
-  const oauthState = new Map<string, { userId: string; createdAt: number; viewId?: string }>();
+  const app = new App(appOptions);
+
+  const oauthState = new Map<
+    string,
+    { userId: string; teamId: string; createdAt: number; viewId?: string }
+  >();
 
   receiver.app.get('/oauth/start', (req, res) => {
     const userId = typeof req.query.user === 'string' ? req.query.user : '';
+    const teamId = typeof req.query.team === 'string' ? req.query.team : '';
     const viewId = typeof req.query.view === 'string' ? req.query.view : '';
-    if (!userId) {
+    if (!userId || !teamId) {
       res.status(400).send('Missing user.');
       return;
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    oauthState.set(state, { userId, createdAt: Date.now(), viewId: viewId || undefined });
+    oauthState.set(state, {
+      userId,
+      teamId,
+      createdAt: Date.now(),
+      viewId: viewId || undefined
+    });
 
     const oauth2 = createOAuth2Client(baseUrl);
     const authUrl = oauth2.generateAuthUrl({
@@ -175,7 +236,7 @@ async function main() {
       const { tokens } = await oauth2.getToken(code);
 
       if (!tokens.refresh_token) {
-        const existing = await getUserToken(stateInfo.userId);
+        const existing = await getUserToken(stateInfo.teamId, stateInfo.userId);
         if (existing?.refreshToken) {
           res.send('連携は有効です。Slackに戻って /gcal を試してください。');
           return;
@@ -194,11 +255,15 @@ async function main() {
         console.warn('Failed to fetch email', err);
       }
 
-      await setUserToken(stateInfo.userId, tokens.refresh_token, email);
+      await setUserToken(stateInfo.teamId, stateInfo.userId, tokens.refresh_token, email);
 
       if (stateInfo.viewId) {
         try {
-          const attendeeOptions = await buildAttendeeOptions(app.client, stateInfo.userId);
+          const attendeeOptions = await buildAttendeeOptions(
+            app.client,
+            stateInfo.teamId,
+            stateInfo.userId
+          );
           await app.client.views.update({
             view_id: stateInfo.viewId,
             view: buildFormView(
@@ -222,8 +287,9 @@ async function main() {
     }
   });
 
-  app.command('/gcal', async ({ command, ack, client, respond }: any) => {
+  app.command('/gcal', async ({ command, ack, client, respond, context }: any) => {
     await ack();
+    const teamId = resolveTeamId(command, context);
 
     let viewId: string | undefined;
     try {
@@ -245,8 +311,8 @@ async function main() {
 
     try {
       const [tokenInfo, attendeeOptions] = await Promise.all([
-        getUserToken(command.user_id),
-        buildAttendeeOptions(client, command.user_id)
+        getUserToken(teamId, command.user_id),
+        buildAttendeeOptions(client, teamId, command.user_id)
       ]);
 
       if (!viewId) {
@@ -276,13 +342,14 @@ async function main() {
     }
   });
 
-  app.action('mode_select', async ({ ack, body, client }: any) => {
+  app.action('mode_select', async ({ ack, body, client, context }: any) => {
     await ack();
+    const teamId = resolveTeamId(body, context);
     const current = parseFormState(body.view.state.values).data;
     const selected = (body.actions[0] as any)?.selected_option?.value as GcalFormMode | undefined;
     const next = { ...current, mode: selected ?? current.mode };
-    const tokenInfo = await getUserToken(body.user.id);
-    const attendeeOptions = await buildAttendeeOptions(client, body.user.id);
+    const tokenInfo = await getUserToken(teamId, body.user.id);
+    const attendeeOptions = await buildAttendeeOptions(client, teamId, body.user.id);
     await client.views.update({
       view_id: body.view.id,
       view: buildFormView(
@@ -296,13 +363,14 @@ async function main() {
     });
   });
 
-  app.action('request_mode_select', async ({ ack, body, client }: any) => {
+  app.action('request_mode_select', async ({ ack, body, client, context }: any) => {
     await ack();
+    const teamId = resolveTeamId(body, context);
     const current = parseFormState(body.view.state.values).data;
     const selected = (body.actions[0] as any)?.selected_option?.value as GcalRequestMode | undefined;
     const next = { ...current, requestMode: selected ?? current.requestMode, mode: 'request' as GcalFormMode };
-    const tokenInfo = await getUserToken(body.user.id);
-    const attendeeOptions = await buildAttendeeOptions(client, body.user.id);
+    const tokenInfo = await getUserToken(teamId, body.user.id);
+    const attendeeOptions = await buildAttendeeOptions(client, teamId, body.user.id);
     await client.views.update({
       view_id: body.view.id,
       view: buildFormView(
@@ -316,16 +384,17 @@ async function main() {
     });
   });
 
-  app.action('gcal_disconnect', async ({ ack, body, client }: any) => {
+  app.action('gcal_disconnect', async ({ ack, body, client, context }: any) => {
     await ack();
-    await removeUserToken(body.user.id);
+    const teamId = resolveTeamId(body, context);
+    await removeUserToken(teamId, body.user.id);
     await client.views.update({
       view_id: body.view.id,
       view: buildFormView(body.user.id, baseUrl, { mode: 'create' }, { connected: false }, [], body.view.id) as any
     });
   });
 
-  app.view('gcal_form', async ({ ack, body, view, client }: any) => {
+  app.view('gcal_form', async ({ ack, body, view, client, context }: any) => {
     const zone = process.env.GCAL_TIMEZONE || 'UTC';
     const { data, errors } = parseFormState(view.state.values);
     if (Object.keys(errors).length > 0) {
@@ -341,8 +410,11 @@ async function main() {
     const now = DateTime.now().setZone(zone);
     const requesterId = body.user.id;
     const viewId = body.view.id;
-    const requesterToken = await getUserToken(requesterId);
-    const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(requesterId)}&view=${encodeURIComponent(viewId)}`;
+    const teamId = resolveTeamId(body, context);
+    const requesterToken = await getUserToken(teamId, requesterId);
+    const connectUrl = `${baseUrl}/oauth/start?team=${encodeURIComponent(
+      teamId
+    )}&user=${encodeURIComponent(requesterId)}&view=${encodeURIComponent(viewId)}`;
 
     if (!requesterToken?.refreshToken && data.mode !== 'free') {
       await client.views.update({
@@ -419,7 +491,7 @@ async function main() {
         const missing: string[] = [];
         const tokensByUser = new Map<string, string>();
         for (const userId of data.attendees ?? []) {
-          const tokenInfo = await getUserToken(userId);
+          const tokenInfo = await getUserToken(teamId, userId);
           if (!tokenInfo?.refreshToken) {
             missing.push(userId);
           } else {
@@ -599,7 +671,7 @@ async function main() {
         const missing: string[] = [];
         const attendeeTokens = new Map<string, string>();
         for (const userId of attendeeIds) {
-          const tokenInfo = await getUserToken(userId);
+          const tokenInfo = await getUserToken(teamId, userId);
           if (!tokenInfo?.refreshToken) {
             missing.push(userId);
           } else {
@@ -750,8 +822,9 @@ async function main() {
     });
   });
 
-  app.action('gcal_share_open', async ({ ack, body, client }: any) => {
+  app.action('gcal_share_open', async ({ ack, body, client, context }: any) => {
     await ack();
+    const teamId = resolveTeamId(body, context);
     let payload: PreviewPayload | null = null;
     try {
       payload = body.view.private_metadata ? (JSON.parse(body.view.private_metadata) as PreviewPayload) : null;
@@ -779,7 +852,8 @@ async function main() {
     });
   });
 
-  app.view('gcal_share', async ({ ack, body, view, client }: any) => {
+  app.view('gcal_share', async ({ ack, body, view, client, context }: any) => {
+    const teamId = resolveTeamId(body, context);
     const channel = view.state.values['share_channel_block']?.['share_channel_select']?.selected_conversation;
     const messageInput = view.state.values['share_message_block']?.['share_message_input'];
     const messagePlain = messageInput?.value?.trim();
@@ -841,8 +915,9 @@ async function main() {
         throw new Error(response.error || 'unknown_error');
       }
       if (response.ts) {
-        const key = `${channel}:${response.ts}`;
+        const key = `${teamId}:${channel}:${response.ts}`;
         sharedRequestMap.set(key, {
+          teamId,
           requesterId,
           attendeeIds,
           title: requestTitle,
@@ -877,8 +952,9 @@ async function main() {
     }
   });
 
-  app.action('gcal_share_request_select', async ({ ack, body, client }: any) => {
+  app.action('gcal_share_request_select', async ({ ack, body, client, context }: any) => {
     await ack();
+    const teamId = resolveTeamId(body, context);
     const channelId = body.channel?.id;
     const messageTs = body.message?.ts;
     const value = (body.actions[0] as any)?.selected_option?.value as string | undefined;
@@ -888,7 +964,7 @@ async function main() {
     const durationMinutes = Number(durationStr);
     if (!startIso || !durationMinutes) return;
 
-    const key = `${channelId}:${messageTs}`;
+    const key = `${teamId}:${channelId}:${messageTs}`;
     const meta = sharedRequestMap.get(key);
     if (!meta) return;
     if (meta.eventId) {
@@ -900,13 +976,13 @@ async function main() {
       return;
     }
 
-    const requesterToken = await getUserToken(meta.requesterId);
+    const requesterToken = await getUserToken(meta.teamId, meta.requesterId);
     if (!requesterToken?.refreshToken) return;
 
     const attendees: { email: string }[] = [];
     const missing: string[] = [];
     for (const userId of meta.attendeeIds) {
-      const tokenInfo = await getUserToken(userId);
+      const tokenInfo = await getUserToken(meta.teamId, userId);
       if (!tokenInfo?.refreshToken) {
         missing.push(userId);
         continue;
@@ -916,7 +992,7 @@ async function main() {
         try {
           email = (await fetchUserEmail(baseUrl, tokenInfo.refreshToken)) ?? undefined;
           if (email) {
-            await updateUserEmail(userId, email);
+            await updateUserEmail(meta.teamId, userId, email);
           }
         } catch {
           missing.push(userId);
@@ -985,13 +1061,14 @@ async function main() {
     }
   });
 
-  app.action('gcal_share_retry', async ({ ack, body, client }: any) => {
+  app.action('gcal_share_retry', async ({ ack, body, client, context }: any) => {
     await ack();
+    const teamId = resolveTeamId(body, context);
     const channelId = body.channel?.id;
     const messageTs = body.message?.ts;
     if (!channelId || !messageTs) return;
 
-    const key = `${channelId}:${messageTs}`;
+    const key = `${teamId}:${channelId}:${messageTs}`;
     const meta = sharedRequestMap.get(key);
     if (!meta) return;
 
@@ -1005,7 +1082,7 @@ async function main() {
     }
 
     try {
-      const requesterToken = await getUserToken(meta.requesterId);
+      const requesterToken = await getUserToken(meta.teamId, meta.requesterId);
       if (!requesterToken?.refreshToken) {
         await client.chat.postEphemeral({
           channel: channelId,
@@ -1043,9 +1120,10 @@ async function main() {
     }
   });
 
-  app.action('gcal_preview_create', async ({ ack, body, client }: any) => {
+  app.action('gcal_preview_create', async ({ ack, body, client, context }: any) => {
     await ack();
     const zone = process.env.GCAL_TIMEZONE || 'UTC';
+    const teamId = resolveTeamId(body, context);
     let payload: PreviewPayload | null = null;
     try {
       payload = body.view.private_metadata ? (JSON.parse(body.view.private_metadata) as PreviewPayload) : null;
@@ -1062,9 +1140,11 @@ async function main() {
     }
 
     try {
-      const requesterToken = await getUserToken(payload.requesterId);
+      const requesterToken = await getUserToken(teamId, payload.requesterId);
       if (!requesterToken?.refreshToken) {
-        const connectUrl = `${baseUrl}/oauth/start?user=${encodeURIComponent(payload.requesterId)}&view=${encodeURIComponent(body.view.id)}`;
+        const connectUrl = `${baseUrl}/oauth/start?team=${encodeURIComponent(
+          teamId
+        )}&user=${encodeURIComponent(payload.requesterId)}&view=${encodeURIComponent(body.view.id)}`;
         await client.views.update({
           view_id: body.view.id,
           view: buildResultView('Google連携が必要です', `先にGoogleアカウント連携が必要です。\n${connectUrl}`) as any
@@ -1110,7 +1190,7 @@ async function main() {
         const attendees: { email: string }[] = [];
         const missing: string[] = [];
         for (const userId of payload.attendeeIds) {
-          const tokenInfo = await getUserToken(userId);
+          const tokenInfo = await getUserToken(teamId, userId);
           if (!tokenInfo?.refreshToken) {
             missing.push(userId);
             continue;
@@ -1120,7 +1200,7 @@ async function main() {
             try {
               email = (await fetchUserEmail(baseUrl, tokenInfo.refreshToken)) ?? undefined;
               if (email) {
-                await updateUserEmail(userId, email);
+                await updateUserEmail(teamId, userId, email);
               }
             } catch (err) {
               console.warn('Failed to fetch email for attendee', err);

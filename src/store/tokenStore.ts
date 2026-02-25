@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
 type TokenRow = {
+  team_id: string;
   user_id: string;
   refresh_token: string;
   email?: string | null;
@@ -24,10 +25,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: false }
 });
 
-export async function getUserToken(userId: string): Promise<TokenStoreValue | null> {
+export async function getUserToken(
+  teamId: string,
+  userId: string
+): Promise<TokenStoreValue | null> {
   const { data, error } = await supabase
     .from(TOKEN_TABLE)
     .select('refresh_token,email')
+    .eq('team_id', teamId)
     .eq('user_id', userId)
     .maybeSingle();
 
@@ -42,40 +47,56 @@ export async function getUserToken(userId: string): Promise<TokenStoreValue | nu
   };
 }
 
-export async function setUserToken(userId: string, refreshToken: string, email?: string) {
+export async function setUserToken(
+  teamId: string,
+  userId: string,
+  refreshToken: string,
+  email?: string
+) {
   const { error } = await supabase.from(TOKEN_TABLE).upsert(
     {
+      team_id: teamId,
       user_id: userId,
       refresh_token: refreshToken,
       email: email ?? null,
       updated_at: new Date().toISOString()
     },
-    { onConflict: 'user_id' }
+    { onConflict: 'team_id,user_id' }
   );
   if (error) {
     throw error;
   }
 }
 
-export async function updateUserEmail(userId: string, email: string) {
+export async function updateUserEmail(teamId: string, userId: string, email: string) {
   const { error } = await supabase
     .from(TOKEN_TABLE)
     .update({ email, updated_at: new Date().toISOString() })
+    .eq('team_id', teamId)
     .eq('user_id', userId);
   if (error) {
     throw error;
   }
 }
 
-export async function removeUserToken(userId: string) {
-  const { error } = await supabase.from(TOKEN_TABLE).delete().eq('user_id', userId);
+export async function removeUserToken(teamId: string, userId: string) {
+  const { error } = await supabase
+    .from(TOKEN_TABLE)
+    .delete()
+    .eq('team_id', teamId)
+    .eq('user_id', userId);
   if (error) {
     throw error;
   }
 }
 
-export async function listUserTokens(): Promise<Array<{ userId: string; email?: string }>> {
-  const { data, error } = await supabase.from(TOKEN_TABLE).select('user_id,email');
+export async function listUserTokens(
+  teamId: string
+): Promise<Array<{ userId: string; email?: string }>> {
+  const { data, error } = await supabase
+    .from(TOKEN_TABLE)
+    .select('user_id,email')
+    .eq('team_id', teamId);
   if (error) {
     throw error;
   }
