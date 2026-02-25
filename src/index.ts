@@ -153,30 +153,6 @@ async function main() {
   const appOptions: any = { receiver };
   if (botToken) {
     appOptions.token = botToken;
-  } else {
-    appOptions.authorize = async ({
-      teamId,
-      enterpriseId,
-      isEnterpriseInstall
-    }: {
-      teamId?: string;
-      enterpriseId?: string;
-      isEnterpriseInstall?: boolean;
-    }) => {
-      const installation = await slackInstallationStore.fetchInstallation({
-        teamId,
-        enterpriseId,
-        isEnterpriseInstall: !!isEnterpriseInstall
-      });
-      return {
-        botToken: installation.bot?.token,
-        botId: installation.bot?.id,
-        botUserId: installation.bot?.userId,
-        userId: installation.user?.id,
-        teamId: installation.team?.id,
-        enterpriseId: installation.enterprise?.id
-      };
-    };
   }
 
   const app = new App(appOptions);
