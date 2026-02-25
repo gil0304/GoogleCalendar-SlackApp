@@ -52,14 +52,21 @@ const sharedRequestMap = new Map<
   }
 >();
 
-async function buildAttendeeOptions(client: any, teamId: string, currentUserId: string) {
+async function buildAttendeeOptions(
+  client: any,
+  teamId: string,
+  currentUserId: string,
+  token?: string
+) {
   const users = await listUserTokens(teamId);
   const results: Array<{ text: { type: 'plain_text'; text: string }; value: string }> = [];
   for (const item of users) {
     if (results.length >= 100) break;
     let label = item.email ?? item.userId;
     try {
-      const info = await client.users.info({ user: item.userId });
+      const info = await client.users.info(
+        token ? { token, user: item.userId } : { user: item.userId }
+      );
       if (info.ok && info.user) {
         const profile: any = info.user.profile ?? {};
         label = profile.display_name || profile.real_name || item.email || item.userId;
@@ -235,12 +242,22 @@ async function main() {
 
       if (stateInfo.viewId) {
         try {
+          const installation = await slackInstallationStore.fetchInstallation({
+            teamId: stateInfo.teamId,
+            isEnterpriseInstall: false
+          });
+          const botToken = installation.bot?.token;
+          if (!botToken) {
+            throw new Error('Missing bot token for view update');
+          }
           const attendeeOptions = await buildAttendeeOptions(
             app.client,
             stateInfo.teamId,
-            stateInfo.userId
+            stateInfo.userId,
+            botToken
           );
           await app.client.views.update({
+            token: botToken,
             view_id: stateInfo.viewId,
             view: buildFormView(
               stateInfo.userId,
