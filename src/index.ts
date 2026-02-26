@@ -244,8 +244,9 @@ async function main() {
         try {
           const installation = await slackInstallationStore.fetchInstallation({
             teamId: stateInfo.teamId,
+            enterpriseId: undefined,
             isEnterpriseInstall: false
-          });
+          } as any);
           const botToken = installation.bot?.token;
           if (!botToken) {
             throw new Error('Missing bot token for view update');
