@@ -19,6 +19,7 @@ export type GcalFormData = {
 export type PreviewPayload =
   | {
       kind: 'create';
+      teamId?: string;
       title: string;
       startISO: string;
       durationMinutes: number;
@@ -27,6 +28,7 @@ export type PreviewPayload =
     }
   | {
       kind: 'free';
+      teamId?: string;
       availabilityText: string;
       attendeeIds: string[];
       requesterId: string;
@@ -35,6 +37,7 @@ export type PreviewPayload =
     }
   | {
       kind: 'request';
+      teamId?: string;
       title: string;
       startISO: string;
       durationMinutes: number;
@@ -460,11 +463,13 @@ export function buildShareView(
   attendeeIds: string[] = [],
   durationMinutes?: number,
   slotOptions?: Array<{ label: string; value: string }>,
-  requesterId?: string
+  requesterId?: string,
+  teamId?: string
 ) {
   const mentions = attendeeIds.map((id) => `<@${id}>`).join(' ');
   const attendeeLine = mentions ? `参加者：${mentions}` : '';
   const metadata = JSON.stringify({
+    teamId,
     availabilityText,
     attendeeLine,
     durationMinutes,

@@ -477,6 +477,7 @@ async function main() {
 
         const metadata: PreviewPayload = {
           kind: 'create',
+          teamId,
           title: data.title!,
           startISO: start.toISO()!,
           durationMinutes,
@@ -624,6 +625,7 @@ async function main() {
           view_id: viewId,
           view: buildPreviewView('空き時間結果', shareText, {
             kind: 'free',
+            teamId,
             availabilityText,
             attendeeIds: data.attendees ?? [],
             requesterId,
@@ -806,6 +808,7 @@ async function main() {
 
         const metadata: PreviewPayload = {
           kind: 'request',
+          teamId,
           title: data.title!,
           startISO: start.toISO()!,
           durationMinutes,
@@ -862,7 +865,8 @@ async function main() {
         payload.attendeeIds,
         payload.durationMinutes,
         payload.slotOptions,
-        payload.requesterId
+        payload.requesterId,
+        payload.teamId || teamId
       ) as any
     });
   });
@@ -887,15 +891,32 @@ async function main() {
 
     await ack({ response_action: 'clear' });
 
-    let metadata: { availabilityText: string; attendeeLine?: string; durationMinutes?: number; slotOptions?: Array<{ label: string; value: string }>; attendeeIds?: string[]; requesterId?: string } | null = null;
+    let metadata: {
+      teamId?: string;
+      availabilityText: string;
+      attendeeLine?: string;
+      durationMinutes?: number;
+      slotOptions?: Array<{ label: string; value: string }>;
+      attendeeIds?: string[];
+      requesterId?: string;
+    } | null = null;
     try {
       metadata = view.private_metadata
-        ? (JSON.parse(view.private_metadata) as { availabilityText: string; attendeeLine?: string; durationMinutes?: number; slotOptions?: Array<{ label: string; value: string }>; attendeeIds?: string[]; requesterId?: string })
+        ? (JSON.parse(view.private_metadata) as {
+            teamId?: string;
+            availabilityText: string;
+            attendeeLine?: string;
+            durationMinutes?: number;
+            slotOptions?: Array<{ label: string; value: string }>;
+            attendeeIds?: string[];
+            requesterId?: string;
+          })
         : null;
     } catch {
       metadata = null;
     }
 
+    const effectiveTeamId = teamId || metadata?.teamId || '';
     const availabilityText = metadata?.availabilityText ?? '';
     const attendeeLine = metadata?.attendeeLine ?? '';
     const codeBlock = availabilityText ? ['```', availabilityText, '```'].join('\n') : '';
@@ -930,9 +951,9 @@ async function main() {
         throw new Error(response.error || 'unknown_error');
       }
       if (response.ts) {
-        const key = `${teamId}:${channel}:${response.ts}`;
+        const key = `${effectiveTeamId}:${channel}:${response.ts}`;
         sharedRequestMap.set(key, {
-          teamId,
+          teamId: effectiveTeamId,
           requesterId,
           attendeeIds,
           title: requestTitle,
@@ -1155,10 +1176,22 @@ async function main() {
     }
 
     try {
-      const requesterToken = await getUserToken(teamId, payload.requesterId);
+      const effectiveTeamId = teamId || payload.teamId || '';
+      if (!effectiveTeamId) {
+        await client.views.update({
+          view_id: body.view.id,
+          view: buildResultView(
+            'エラー',
+            'ワークスペース情報が取得できませんでした。もう一度 /gcal を実行してください。'
+          ) as any
+        });
+        return;
+      }
+
+      const requesterToken = await getUserToken(effectiveTeamId, payload.requesterId);
       if (!requesterToken?.refreshToken) {
         const connectUrl = `${baseUrl}/oauth/start?team=${encodeURIComponent(
-          teamId
+          effectiveTeamId
         )}&user=${encodeURIComponent(payload.requesterId)}&view=${encodeURIComponent(body.view.id)}`;
         await client.views.update({
           view_id: body.view.id,
@@ -1205,7 +1238,7 @@ async function main() {
         const attendees: { email: string }[] = [];
         const missing: string[] = [];
         for (const userId of payload.attendeeIds) {
-          const tokenInfo = await getUserToken(teamId, userId);
+          const tokenInfo = await getUserToken(effectiveTeamId, userId);
           if (!tokenInfo?.refreshToken) {
             missing.push(userId);
             continue;
@@ -1215,7 +1248,7 @@ async function main() {
             try {
               email = (await fetchUserEmail(baseUrl, tokenInfo.refreshToken)) ?? undefined;
               if (email) {
-                await updateUserEmail(teamId, userId, email);
+                await updateUserEmail(effectiveTeamId, userId, email);
               }
             } catch (err) {
               console.warn('Failed to fetch email for attendee', err);
