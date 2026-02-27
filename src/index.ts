@@ -135,6 +135,16 @@ function buildShareMessageBlocks(
   return blocks;
 }
 
+function findSharedRequestKey(teamId: string, channelId: string, messageTs: string) {
+  const exact = `${teamId}:${channelId}:${messageTs}`;
+  if (sharedRequestMap.has(exact)) return exact;
+  const suffix = `:${channelId}:${messageTs}`;
+  for (const key of sharedRequestMap.keys()) {
+    if (key.endsWith(suffix)) return key;
+  }
+  return exact;
+}
+
 async function main() {
   const signingSecret = requireEnv('SLACK_SIGNING_SECRET');
   const botToken = process.env.SLACK_BOT_TOKEN;
@@ -991,8 +1001,8 @@ async function main() {
   app.action('gcal_share_request_select', async ({ ack, body, client, context }: any) => {
     await ack();
     const teamId = resolveTeamId(body, context);
-    const channelId = body.channel?.id;
-    const messageTs = body.message?.ts;
+    const channelId = body.channel?.id || body.container?.channel_id;
+    const messageTs = body.message?.ts || body.container?.message_ts;
     const value = (body.actions[0] as any)?.selected_option?.value as string | undefined;
     if (!channelId || !messageTs || !value) return;
 
@@ -1000,7 +1010,7 @@ async function main() {
     const durationMinutes = Number(durationStr);
     if (!startIso || !durationMinutes) return;
 
-    const key = `${teamId}:${channelId}:${messageTs}`;
+    const key = findSharedRequestKey(teamId, channelId, messageTs);
     const meta = sharedRequestMap.get(key);
     if (!meta) return;
     if (meta.eventId) {
@@ -1012,13 +1022,15 @@ async function main() {
       return;
     }
 
-    const requesterToken = await getUserToken(meta.teamId, meta.requesterId);
+    const effectiveTeamId = meta.teamId || teamId;
+    if (!effectiveTeamId) return;
+    const requesterToken = await getUserToken(effectiveTeamId, meta.requesterId);
     if (!requesterToken?.refreshToken) return;
 
     const attendees: { email: string }[] = [];
     const missing: string[] = [];
     for (const userId of meta.attendeeIds) {
-      const tokenInfo = await getUserToken(meta.teamId, userId);
+      const tokenInfo = await getUserToken(effectiveTeamId, userId);
       if (!tokenInfo?.refreshToken) {
         missing.push(userId);
         continue;
@@ -1028,7 +1040,7 @@ async function main() {
         try {
           email = (await fetchUserEmail(baseUrl, tokenInfo.refreshToken)) ?? undefined;
           if (email) {
-            await updateUserEmail(meta.teamId, userId, email);
+            await updateUserEmail(effectiveTeamId, userId, email);
           }
         } catch {
           missing.push(userId);
@@ -1100,11 +1112,11 @@ async function main() {
   app.action('gcal_share_retry', async ({ ack, body, client, context }: any) => {
     await ack();
     const teamId = resolveTeamId(body, context);
-    const channelId = body.channel?.id;
-    const messageTs = body.message?.ts;
+    const channelId = body.channel?.id || body.container?.channel_id;
+    const messageTs = body.message?.ts || body.container?.message_ts;
     if (!channelId || !messageTs) return;
 
-    const key = `${teamId}:${channelId}:${messageTs}`;
+    const key = findSharedRequestKey(teamId, channelId, messageTs);
     const meta = sharedRequestMap.get(key);
     if (!meta) return;
 
@@ -1118,7 +1130,9 @@ async function main() {
     }
 
     try {
-      const requesterToken = await getUserToken(meta.teamId, meta.requesterId);
+      const effectiveTeamId = meta.teamId || teamId;
+      if (!effectiveTeamId) return;
+      const requesterToken = await getUserToken(effectiveTeamId, meta.requesterId);
       if (!requesterToken?.refreshToken) {
         await client.chat.postEphemeral({
           channel: channelId,
